@@ -1,11 +1,13 @@
 // ==UserScript==
-// @name         Kling — Auto-attach @Elements on paste
+// @name         Kling Omni — Auto Tag Prompt
 // @namespace    local.kling.autoattach
-// @version      0.4.1
+// @version      0.4.3
 // @description  After pasting a prompt, bind every plain-text @Name token to its Element in the library. Handles aliases like @img1 -> Image1.
 // @author       Amey Arora
 // @homepage     https://socialdealers.in
-// @supportURL   https://socialdealers.in
+// @supportURL   https://github.com/ameyarora/kling-ai-scripts/issues
+// @downloadURL  https://raw.githubusercontent.com/ameyarora/kling-ai-scripts/main/kling-omni-auto-tag-prompt.user.js
+// @updateURL    https://raw.githubusercontent.com/ameyarora/kling-ai-scripts/main/kling-omni-auto-tag-prompt.user.js
 // @match        https://app.klingai.com/*
 // @match        https://klingai.com/*
 // @match        https://*.klingai.com/*
@@ -16,7 +18,7 @@
 // @run-at       document-idle
 // ==/UserScript==
 /*
- * Kling - Auto-attach Elements
+ * Kling Omni - Auto Tag Prompt
  * Developed by Amey Arora - https://socialdealers.in
  */
 
