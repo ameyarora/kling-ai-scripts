@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kling Omni — Auto Tag Prompt
 // @namespace    local.kling.autoattach
-// @version      0.4.3
-// @description  After pasting a prompt, bind every plain-text @Name token to its Element in the library. Handles aliases like @img1 -> Image1.
+// @version      0.6.0
+// @description  After pasting a prompt, bind every plain-text @Name token to its Element in the library. Handles aliases (@img1, @image, @video) and single- vs multi-attachment naming.
 // @author       Amey Arora
 // @homepage     https://socialdealers.in
 // @supportURL   https://github.com/ameyarora/kling-ai-scripts/issues
@@ -36,16 +36,29 @@
     tokenRe: /@([\w-]+)/g,
 
     // ---- ALIASES -------------------------------------------------------
-    // Kling only knows the real element names (Image1, Image2, ...). These
-    // rewrite what you typed into what Kling has. Pattern -> replacement,
-    // $1 is the captured digits. First match wins; if none match, the token
-    // is used as-is. The raw token is always tried as a fallback, so an
-    // element genuinely named "img1" still binds correctly.
+    // Kling names elements "Image1, Image2, ..." when several are attached,
+    // but plain "Image" when there is only one. Same for "Video" (Kling takes
+    // exactly one). Rather than counting attachments, each token expands into
+    // an ordered candidate list and the popup decides: whichever name Kling
+    // actually offers is the one that binds.
+    //
+    //   words      - prefixes that mean this element type (longest wins)
+    //   base       - the real Kling element name
+    //   preferBare - try "Video" before "Video1" (right for single-slot types)
+    //
+    //   @img2 / @image2 / @i2   -> Image2, Image, img2
+    //   @img1 (one image only)  -> Image1, Image, img1   ("Image" wins)
+    //   @image (no number)      -> Image, Image1, image
+    //   @vid / @video / @video1 -> Video, Video1, <raw>
+    //
+    // A token may also run straight into the next word with no space, e.g.
+    // "@vid1REFERENCES". Only the "vid1" is consumed and bound; "REFERENCES"
+    // is retyped after the chip untouched. The split is only accepted at a
+    // safe boundary - after digits, or before an uppercase letter when the
+    // matched word is 3+ chars - so "@voiceover" is never read as "v" + rest.
     aliases: [
-      [/^img(\d+)$/i, 'Image$1'],      // @img1   -> Image1
-      [/^image(\d+)$/i, 'Image$1'],    // @image1 -> Image1  (fixes casing)
-      [/^i(\d+)$/i, 'Image$1'],        // @i1     -> Image1
-      [/^ref(\d+)$/i, 'Image$1'],      // @ref1   -> Image1
+      { words: ['image', 'img', 'pic', 'ref', 'i'], base: 'Image', preferBare: false },
+      { words: ['video', 'vid', 'clip', 'v'], base: 'Video', preferBare: true },
     ],
     // Exact one-off renames, case-insensitive keys: { hero: 'Image1' }
     aliasMap: {},
@@ -80,19 +93,39 @@
 
   /* ---------- alias resolution ---------- */
 
-  function canonical(raw) {
+  // Split "@vid1REFERENCES" into the part that names an element ("vid1") and
+  // the prose that follows ("REFERENCES"), then list the names to try for it.
+  // The popup is the arbiter: the first candidate Kling actually offers wins.
+  function resolveToken(full) {
     for (const k of Object.keys(CFG.aliasMap)) {
-      if (k.toLowerCase() === raw.toLowerCase()) return CFG.aliasMap[k];
+      if (k.toLowerCase() === full.toLowerCase()) {
+        return { head: full, tail: '', names: [...new Set([CFG.aliasMap[k], full])] };
+      }
     }
-    for (const [re, out] of CFG.aliases) {
-      if (re.test(raw)) return raw.replace(re, out);
-    }
-    return raw;
-  }
 
-  // canonical name first, raw token as fallback (dedup preserves order)
-  function nameCandidates(raw) {
-    return [...new Set([canonical(raw), raw])];
+    let best = null;
+    for (const rule of CFG.aliases) {
+      // longest word first, so "image2" isn't read as "i" + "mage2"
+      for (const w of [...rule.words].sort((a, b) => b.length - a.length)) {
+        if (!full.toLowerCase().startsWith(w.toLowerCase())) continue;
+        const digits = (full.slice(w.length).match(/^\d+/) || [''])[0];
+        const consumed = w.length + digits.length;
+        const tail = full.slice(consumed);
+        // only split where it is unambiguous
+        const boundaryOk = tail === ''                              // whole token
+          || digits.length > 0                                      // @vid1REFERENCES
+          || (w.length >= 3 && /^[A-Z]/.test(tail));                // @videoREFERENCES
+        if (!boundaryOk) continue;
+        if (best && consumed <= best.consumed) continue;
+        const head = full.slice(0, consumed);
+        const numbered = rule.base + (digits || '1');
+        // no digits typed, or a single-slot type -> bare name first
+        const order = (rule.preferBare || !digits) ? [rule.base, numbered]
+                                                   : [numbered, rule.base];
+        best = { head, tail, consumed, names: [...new Set([...order, head])] };
+      }
+    }
+    return best || { head: full, tail: '', names: [full] };
   }
 
   /* ---------- find the prompt editor ---------- */
@@ -127,9 +160,10 @@
       while ((m = CFG.tokenRe.exec(text))) {
         const key = m[1] + '@' + (base + m.index);
         if (!failed.has(key)) {
+          const r = resolveToken(m[1]);
           return {
             node, start: m.index, end: m.index + m[0].length,
-            raw: m[1], names: nameCandidates(m[1]), key,
+            raw: m[1], head: r.head, tail: r.tail, names: r.names, key,
           };
         }
       }
@@ -145,6 +179,16 @@
     const r = document.createRange();
     r.setStart(node, start);
     r.setEnd(node, end);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+  }
+
+  function caretAfter(editor, node) {
+    editor.focus();
+    const r = document.createRange();
+    r.setStartAfter(node);
+    r.collapse(true);
     const sel = getSelection();
     sel.removeAllRanges();
     sel.addRange(r);
@@ -328,28 +372,28 @@
     }
 
     const restore = () => {
-      // put the original token back so a failure never eats prompt text
-      if (typed !== tok.raw) {
-        if (typed) deleteChars(typed.length);
-        insertText(tok.raw);
-      }
+      // rebuild the token exactly as written, tail included, so a failure
+      // never eats prompt text ("@" itself is still in place)
+      if (typed) deleteChars(typed.length);
+      insertText(tok.head + tok.tail);
       pressEscape(editor);
     };
 
     if (!hit) {
-      log('no library element matches @' + tok.raw + ' (tried: ' + tok.names.join(', ') + ')');
+      log('no library element matches @' + tok.head + ' (tried: ' + tok.names.join(', ') + ')');
       restore();
       return 'nomatch';
     }
 
     if (CFG.dryRun) {
-      log('DRY RUN — @' + tok.raw + ' -> "' + hit.name + '", would click', hit.el);
+      log('DRY RUN — @' + tok.head + ' -> "' + hit.name + '", would click', hit.el);
       restore();
       return 'nomatch';
     }
 
     const elsBefore = new Set(editor.querySelectorAll('*'));
-    log('@' + tok.raw + ' -> binding as "' + hit.name + '"');
+    log('@' + tok.head + ' -> binding as "' + hit.name + '"'
+        + (tok.tail ? ' (keeping "' + tok.tail + '")' : ''));
     realClick(hit.el);
 
     // success = a chip element actually materialised inside the editor
@@ -363,6 +407,11 @@
     }
 
     if (CFG.stripLeftover) stripLeftover(editor, chip, typed);
+    if (tok.tail) {
+      // put the run-on word back, after the chip rather than before it
+      caretAfter(editor, chip);
+      insertText(tok.tail);
+    }
     await sleep(CFG.afterClickSettle);
     return 'ok';
   }
@@ -385,7 +434,7 @@
         if (abort) { log('aborted by user'); break; }
         const tok = nextToken(editor, failed);
         if (!tok) break;
-        status('attaching @' + tok.raw + '... (click to stop)');
+        status('attaching @' + tok.head + '... (click to stop)');
         const res = await bind(editor, tok);
         if (res === 'ok') {
           ok++;
@@ -452,7 +501,7 @@
   /* ---------- console API ---------- */
 
   window.klingAttach = {
-    CFG, run, canonical,
+    CFG, run, resolveToken,
     stop() { abort = true; },
     diagnose() {
       const editor = findEditor();
@@ -466,10 +515,18 @@
           while ((m = CFG.tokenRe.exec(n.nodeValue || ''))) found.push(m[1]);
         }
       }
-      console.table(found.map((raw) => ({ token: '@' + raw, willBindAs: canonical(raw) })));
+      console.table(found.map((raw) => {
+        const r = resolveToken(raw);
+        return {
+          token: '@' + raw,
+          binds: '@' + r.head,
+          keepsAsText: r.tail || '-',
+          tries: r.names.join(' -> '),
+        };
+      }));
       if (editor && found.length) {
-        console.log('decoys on screen for "' + canonical(found[0]) + '":',
-                    labelMatches(canonical(found[0]), editor));
+        const first = resolveToken(found[0]).names[0];
+        console.log('decoys on screen for "' + first + '":', labelMatches(first, editor));
       }
       return { editor, tokens: found };
     },
